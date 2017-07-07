@@ -83,7 +83,7 @@ class translate:
             return notfound()
 
         # return '{0}({1})'.format( params.callback, json.dumps( translation, indent=2 ) )
-
+        print( 'will return translation: ', json.dumps( { 'house': translation.house, 'floor': translation.floor, 'room': translation.room, 'domain': translation.domain, 'item': translation.item }, indent=2 ) )
         return json.dumps( { 'house': translation.house, 'floor': translation.floor, 'room': translation.room, 'domain': translation.domain, 'item': translation.item }, indent=2 )
 
 
@@ -91,22 +91,52 @@ class translate:
         # print( configurationTxt )
         translation = Translation()
         sections = translate.split( "/" )
+        print( sections )
+        translation.domain = sections[3]
         house = sections[0]
         if( len( house ) > 0 ):
-            for h in range( 0, len( configurationTxt ) ):
-                if( 'mqtt' in configurationTxt[h] ):
-                    print( configurationTxt[h]['mqtt'] )
-                # for key in configurationTxt[h]:
-                #     print( key )
-                    if( configurationTxt[h]['mqtt'] == house ):
-                        translation.house = configurationTxt[h][ 'name' ]
-                        print( translation )
+            houseConf = self.__findInConfiguration( house, None, configurationTxt, 'mqtt' )
+            if( houseConf is not None ):
+                translation.house = houseConf[ 'name' ]
+                floor = sections[1]
+                print( 'floor: {}', floor )
+                if( len( floor ) == 0 ):
+                    itemConf = self.__findInConfiguration( translate, 'items', houseConf, 'subscribe' )
+                    if( itemConf is not None ):
+                        translation.item = itemConf[ 'name' ]
+                else:
+                    floorConf = self.__findInConfiguration( floor, 'floors', houseConf, 'mqtt' )
+                    if( floorConf is not None ):
+                        translation.floor = floorConf[ 'name' ]
 
-                        TODO
-
-        print( sections )
+                    room = sections[2]
+                    if( len( room ) == 0 ):
+                        itemConf = self.__findInConfiguration( translate, 'items', houseConf, 'subscribe' )
+                        if( itemConf is not None ):
+                            translation.item = itemConf[ 'name' ]
+                    else:
+                        roomConf = self.__findInConfiguration( room, 'rooms', floorConf, 'mqtt' )
+                        if( roomConf is not None ):
+                            translation.room = roomConf[ 'name' ]
+                            itemConf = self.__findInConfiguration( translate, 'items', roomConf, 'subscribe' )
+                            if( itemConf is not None ):
+                                translation.item = itemConf[ 'name' ]
+                
         return translation
 
+    def __findInConfiguration( self, mqtt, entity, configuration, tag ):
+        configurationSection = configuration
+        if( entity is not None ):
+            if( not entity in configuration ):
+                return None
+            else:
+                configurationSection = configuration[ entity ]
+
+        for i in range( 0, len( configurationSection ) ):
+            if( tag in configurationSection[i] and configurationSection[ i ][ tag ] == mqtt ):
+                return configurationSection[ i ]
+        
+        return None
 
 if __name__ == "__main__":
     app = web.application(urls, globals())
