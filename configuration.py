@@ -1,146 +1,135 @@
 #!/usr/bin/env python
-import web
 import json
 import os.path # to check if configuration file exists
+import paho.mqtt.client as mqtt  #import the client1
+import signal   #to detect CTRL C
+import sys
+import os, time
 
+class MqttParams( object ):
+    """ Holds the mqtt connection params
+    """
+    def __init__( self, address, port, subscribeTopic, publishTopic ):
+        self.address = address
+        self.port = port
+        self.subscribeTopic = subscribeTopic
+        self.publishTopic = publishTopic
 
-def notfound():
-    #return web.notfound("Sorry, the page you were looking for was not found.")
-    return json.dumps({'ok':0, 'errcode': 404})
+class Configuration( object ):
+    """ This class implements the handler of house configuration. It publishes the configuration and saves new configuration when received in incoming messages.
 
-def internalerror():
-    #return web.internalerror("Bad, bad server. No donut for you.")
-    return json.dumps({'ok':0, 'errcode': 500})
+    Valid messages:
+        {"cmd": "SEND" } : for publishing the current configuration
+        {"cmd": "SAVE", "data": "new configuration in json format" } : for saving ne configuration
+    """
+    ConfigurationFile = 'houses-configuration.json'
+    def __init__( self, mqttId, mqttParams ):
+        self.mqttParams = mqttParams
+        self.mqttId = mqttId
+        signal.signal( signal.SIGINT, self.__signalHandler )
 
-def badData():
-    return json.dumps( { 'ok': 0, 'errcode': 400 } )
-
-urls = (
-    '/configuration(.*)', 'configuration',
-    '/translate(.*)', 'translate'
-)
-
-
-app = web.application(urls, globals())
-app.notfound = notfound
-app.internalerror = internalerror
-
-class configuration:
-    ConfigurationFile = 'configuration.json'
-    def GET( self, params ):        
-        queryString = web.input()
-        print( queryString )
-        if( not os.path.isfile( configuration.ConfigurationFile ) ):
-            print( 'Configuration file "{}" not found, exiting.'.format( configuration.ConfigurationFile ) )
-            return internalerror()
-
-        with open( configuration.ConfigurationFile ) as json_file:
-            configurationTxt = json.load( json_file )
-            # print( 'Configuration: \n{}', json.dumps( configurationTxt ) )
-            # the response must have this particular format due to angular quirks see https://stackoverflow.com/questions/11574850/jsonp-web-service-with-python
-            return '{0}({1})'.format( queryString.callback, json.dumps( configurationTxt, indent=2 ) )
-
-    def POST( self ):
-        data = web.data()
-        print( data )
+    def run( self ):
+        #create a mqtt client
+        self.client = mqtt.Client( self.mqttId )
+        self.client.on_connect = self.__on_connect
+        self.client.on_message = self.__on_message
+        #set last will and testament before connecting
+        self.client.will_set( self.mqttParams.publishTopic, json.dumps({ 'main': 'UNAVAILABLE' }), qos = 1, retain = True )
+        self.client.connect( self.mqttParams.address, self.mqttParams.port )
+        self.client.loop_start()
+        lastModdate = None
         try:
-            json.loads( data )
-        except:
-            return badData()
+            lastModdate = os.stat( Configuration.ConfigurationFile )[8]
+        except Exception, e:
+            print( 'Error stating {}. Error: {}'.format( Configuration.ConfigurationFile, e.message ) )
+        #go in infinite loop        
+        while( True ):
+            time.sleep( 5 )
+            try:
+                moddate = os.stat( Configuration.ConfigurationFile )[8]
+                print( 'last [{}], currrent [{}]'.format( time.ctime( lastModdate ), time.ctime( moddate ) ) )
+                if( lastModdate != moddate ):
+                    print( '{} has changed. Reading ans resending'.format( Configuration.ConfigurationFile ) )
+                    self.__readAndSendConfiguration()
+            except Exception, e:
+                print( 'Error in infinite loop stating {}. Error: {}'.format( Configuration.ConfigurationFile, e.message ) )
 
-        try:
-            with open( configuration.ConfigurationFile, 'w' ) as outfile:
-                json.dump( data, outfile )
-        except:
-            internalerror()
+    def __signalHandler( self, signal, frame ):
+        print('Ctrl+C pressed!')
+        self.client.disconnect()
+        self.client.loop_stop()
+        sys.exit(0)        
+
+    def __on_connect( self, client, userdata, flags_dict, result ):
+        """Executed when a connection with the mqtt broker has been established
+        """
+        #debug:
+        m = "Connected flags"+str(flags_dict)+"result code " + str(result)+"client1_id  "+str(client)
+        print( m )
+
+        # tell other devices that the notifier is available
+        self.client.will_set( self.mqttParams.publishTopic, json.dumps({ 'main': 'AVAILABLE' }), qos = 1, retain = True )
         
-        return json.dumps( { 'ok': 200, 'errcode': 0 } )
+        #subscribe to start listening for incomming commands
+        self.client.subscribe( self.mqttParams.subscribeTopic )
 
-class Translation( object ):
-    def __init__( self ):
-        self.house = ''
-        self.floor = ''
-        self.room = ''
-        self.domain = ''
-        self.item = ''
-
-class translate:
-    def GET( self, params ):
-        params = web.input()
-        print( params )
-        if( params.item is None ):
-            return badData()
-
+    def __readAndSendConfiguration( self ):
         try:
-            with open( configuration.ConfigurationFile ) as json_file:
+            with open( Configuration.ConfigurationFile ) as json_file:
                 configurationTxt = json.load( json_file )
-        except:
-            return internalerror()
-                        
-        translation = self.__findTranslation( params.item, configurationTxt )
-        
-        if( translation is None ):
-            return notfound()
+                print( configurationTxt )
+                self.client.publish( self.mqttParams.publishTopic, json.dumps( configurationTxt ), qos = 2, retain = True )
+        except Exception, e:
+            print( 'Error reading {}. Error: {}'.format( Configuration.ConfigurationFile, e.message ) )
+            pass
 
-        # return '{0}({1})'.format( params.callback, json.dumps( translation, indent=2 ) )
-        print( 'will return translation: ', json.dumps( { 'house': translation.house, 'floor': translation.floor, 'room': translation.room, 'domain': translation.domain, 'item': translation.item }, indent=2 ) )
-        return json.dumps( { 'house': translation.house, 'floor': translation.floor, 'room': translation.room, 'domain': translation.domain, 'item': translation.item }, indent=2 )
+    def __on_message( self, client, userdata, message ):
+        """Executed when an mqtt arrives
+        """
+        text = message.payload.decode( "utf-8" )
+        print( 'Received message "{}"'.format( text ).encode( 'utf-8' ) )
+        if( mqtt.topic_matches_sub( self.mqttParams.subscribeTopic, message.topic ) ):            
+            try:
+                jsonMessage = json.loads( text )
+            except ValueError, e:
+                print( '"{}" is not a valid json text, exiting.'.format( text ) )
+                return
 
+            try:
+                cmd = jsonMessage[ 'cmd' ]
+            except Exception, e:
+                print( '"{}" is not a valid command. Error:'.format( text, e.message ) )
+                return
+            if( cmd == 'SEND' ):
+                print( 'Will read and send the configuration' )
+                self.__readAndSendConfiguration()
+            elif( cmd == 'SAVE' ):
+                print( 'Will store new configuration in file {}'.format( Configuration.ConfigurationFile ) )
+                try:
+                    data = jsonMessage[ 'data' ]
+                    with open( Configuration.ConfigurationFile, 'w' ) as outfile:
+                        json.dump( data, outfile )
+                        #publish the new configurationso all subscribers are updated
+                        self.client.publish( self.mqttParams.publishTopic, data, qos = 2, retian = True )
+                except Exception, e:
+                    print( 'Failed saving new configuration. Error: {}'.format( e.message ) )
+                    pass
 
-    def __findTranslation( self, translate, configurationTxt ):
-        # print( configurationTxt )
-        translation = Translation()
-        sections = translate.split( "/" )
-        print( sections )
-        translation.domain = sections[3]
-        house = sections[0]
-        if( len( house ) > 0 ):
-            houseConf = self.__findInConfiguration( house, None, configurationTxt, 'mqtt' )
-            if( houseConf is not None ):
-                translation.house = houseConf[ 'name' ]
-                floor = sections[1]
-                print( 'floor: {}', floor )
-                if( len( floor ) == 0 ):
-                    itemConf = self.__findInConfiguration( translate, 'items', houseConf, 'subscribe' )
-                    if( itemConf is not None ):
-                        translation.item = itemConf[ 'name' ]
-                else:
-                    floorConf = self.__findInConfiguration( floor, 'floors', houseConf, 'mqtt' )
-                    if( floorConf is not None ):
-                        translation.floor = floorConf[ 'name' ]
-
-                    room = sections[2]
-                    if( len( room ) == 0 ):
-                        itemConf = self.__findInConfiguration( translate, 'items', houseConf, 'subscribe' )
-                        if( itemConf is not None ):
-                            translation.item = itemConf[ 'name' ]
-                    else:
-                        roomConf = self.__findInConfiguration( room, 'rooms', floorConf, 'mqtt' )
-                        if( roomConf is not None ):
-                            translation.room = roomConf[ 'name' ]
-                            itemConf = self.__findInConfiguration( translate, 'items', roomConf, 'subscribe' )
-                            if( itemConf is not None ):
-                                translation.item = itemConf[ 'name' ]
-                
-        return translation
-
-    def __findInConfiguration( self, mqtt, entity, configuration, tag ):
-        configurationSection = configuration
-        if( entity is not None ):
-            if( not entity in configuration ):
-                return None
-            else:
-                configurationSection = configuration[ entity ]
-
-        for i in range( 0, len( configurationSection ) ):
-            if( tag in configurationSection[i] and configurationSection[ i ][ tag ] == mqtt ):
-                return configurationSection[ i ]
-        
-        return None
 
 if __name__ == "__main__":
-    app = web.application(urls, globals())
-    app.run()
+    settingsFile = 'settings.conf'
+    if( not os.path.isfile( settingsFile ) ):
+        print( 'Settings file "{}" not found, exiting.'.format( settingsFile ) )
+        sys.exit()
 
-app = web.application(urls, globals(), autoreload=False)
-application = app.wsgifunc()
+    with open( settingsFile ) as json_file:
+        settings = json.load( json_file )
+        print( 'Settings: \n{}'.format( json.dumps( settings, indent = 2  ) ) )
+        
+
+        configuration = Configuration( 
+            settings['mqttId'],
+            MqttParams( settings['mqttParams']['address'], int( settings['mqttParams']['port'] ), settings['mqttParams']['subscribeTopic'], settings['mqttParams']['publishTopic'] )
+        )
+
+        configuration.run()
